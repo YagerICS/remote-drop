@@ -17,6 +17,12 @@ pub struct Queue<A: Allocator> {
     head: Mutex<CriticalSectionRawMutex, core::cell::RefCell<ToDeallocate<A>>>,
 }
 
+/**
+We artificially loosened the `Send` semantics for
+QueueStorageBox, so we have to tighten them back up for the queue.
+    */
+unsafe impl<A: Allocator + Send> Send for Queue<A> {}
+
 impl<A: Allocator + 'static> Queue<A> {
     pub const fn new() -> Queue<A> {
         let head = Mutex::new(RefCell::new(ToDeallocate::new()));
