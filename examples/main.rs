@@ -17,10 +17,13 @@ impl Drop for Noisy {
 fn main() {
     let q: &'static Queue<Global> = &DEALLOC_QUEUE;
     {
-        let box1 = RBox::try_new(Noisy(1), Global, &DEALLOC_QUEUE);
-        let box2 = RBox::try_new(Noisy(2), Global, &DEALLOC_QUEUE);
-        let n3 = Noisy(3);
+        // Will get added to the cleanup queue on drop
+        let _box1 = RBox::try_new(Noisy(1), Global, q);
+        let _box2 = RBox::try_new(Noisy(2), Global, q);
+        // Will get dropped right away
+        let _n3 = Noisy(3);
     }
     println!("Done allocating");
+    // Clean up the stuff on the GC queue
     while q.garbage_collect_one() {}
 }

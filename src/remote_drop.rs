@@ -11,7 +11,7 @@ extern crate alloc;
 
 /**
 Contains the items that have been pseudo-dropped in other threads and need
-to be actuall dropped in the GC thread.
+to be actually dropped in the GC thread.
 */
 pub struct Queue<A: Allocator> {
     head: Mutex<CriticalSectionRawMutex, core::cell::RefCell<ToDeallocate<A>>>,
