@@ -1,6 +1,6 @@
 [package]
 name = "remote-drop"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -12,6 +12,11 @@ heapless = {version = "0.8.0", features = ["defmt-03"]}
 # cleanup queues, but we can make that parametric over an arbitrary choice of mutex
 # and get rid of this dependency.
 embassy-sync = {git = "https://github.com/embassy-rs/embassy", features=[]}
+
+[dev-dependencies]
+critical-section = {version = "1.1.2", features = ["std"]}
+talc = "4.4.1"
+spin = { version =  "0.9.8", default-features = false, features = ["lock_api", "spin_mutex"] }
 
 [[example]]
 name = "main"
