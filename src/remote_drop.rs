@@ -296,4 +296,55 @@ mod test {
         while q.garbage_collect_one() {}
         assert_eq!(expected, tracker.results())
     }
+
+    #[test]
+    fn test_talc_send() {
+        static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
+        static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
+            Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
+        unsafe {
+            TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
+        }
+
+        type Alc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
+        static DEALLOC_QUEUE: Queue<Alc> = Queue::new();
+        let tracker = DT::new();
+        let mut expected = BTreeMap::new();
+        let q: &'static Queue<Alc> = &DEALLOC_QUEUE;
+        let a: Alc = &TALCK;
+        let box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
+        let (s1, r1) = std::sync::mpsc::channel();
+        let t1 = std::thread::spawn(move || {
+            r1.recv().unwrap();
+            std::mem::drop(box1);
+        });
+
+        let box2 = RBox::try_new(D(2, tracker.clone()), a, q).unwrap();
+        let (s2, r2) = std::sync::mpsc::channel();
+        let t2 = std::thread::spawn(move || {
+            r2.recv().unwrap();
+            std::mem::drop(box2);
+        });
+        {
+            let _n3 = D(3, tracker.clone());
+        }
+
+        expected.insert(0, 3);
+        while q.garbage_collect_one() {}
+        assert_eq!(expected, tracker.results());
+
+        s1.send(()).unwrap();
+        t1.join().unwrap();
+        assert_eq!(expected, tracker.results());
+        while q.garbage_collect_one() {}
+        expected.insert(1, 1);
+        assert_eq!(expected, tracker.results());
+
+        s2.send(()).unwrap();
+        t2.join().unwrap();
+        assert_eq!(expected, tracker.results());
+        while q.garbage_collect_one() {}
+        expected.insert(2, 2);
+        assert_eq!(expected, tracker.results());
+    }
 }
