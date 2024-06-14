@@ -19,7 +19,9 @@ pub struct Queue<A: Allocator> {
 
 /**
 We artificially loosened the `Send` semantics for
-QueueStorageBox, so we have to tighten them back up for the queue.
+QueueStorageBox, so we have to tighten them back up for the queue as a whole.
+We shouldn't be able to send the queue between threads unless we can also send the allocator,
+since we can take Box<_,A>s out of the queue.
     */
 unsafe impl<A: Allocator + Send> Send for Queue<A> {}
 
