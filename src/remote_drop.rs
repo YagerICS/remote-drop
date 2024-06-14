@@ -211,6 +211,7 @@ mod test {
 
     use crate::remote_drop::{Queue, RBox};
 
+    // Central place for tracking deallocation order
     struct DeallocTracker<Id> {
         dealloc_map: BTreeMap<usize, Id>,
     }
@@ -221,6 +222,8 @@ mod test {
         }
     }
 
+    // A clonable object we can pass around to track when
+    // things get dropped
     #[derive(Clone)]
     struct DT<Id>(Arc<Mutex<DeallocTracker<Id>>>);
 
@@ -235,6 +238,8 @@ mod test {
         }
     }
 
+    // An object that registers when it gets dropped.
+    // Stores its ID in the `DT` upon drop().
     struct D(u64, DT<u64>);
 
     impl Drop for D {
@@ -244,6 +249,7 @@ mod test {
         }
     }
 
+    // Simple case - global allocator.
     #[test]
     fn test_global_drop() {
         static DEALLOC_QUEUE: Queue<Global> = Queue::new();
@@ -262,10 +268,12 @@ mod test {
             expected.insert(0, 3);
         }
         println!("Done allocating");
+        // Clean up all the dropped values.
         while q.garbage_collect_one() {}
         assert_eq!(expected, tracker.results())
     }
 
+    // Slightly more complex - using a custom allocator.
     #[test]
     fn test_talc_drop() {
         static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
@@ -275,12 +283,12 @@ mod test {
             TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
         }
 
-        type Alc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
-        static DEALLOC_QUEUE: Queue<Alc> = Queue::new();
+        type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
+        static DEALLOC_QUEUE: Queue<Alloc> = Queue::new();
         let tracker = DT::new();
         let mut expected = BTreeMap::new();
-        let q: &'static Queue<Alc> = &DEALLOC_QUEUE;
-        let a: Alc = &TALCK;
+        let q: &'static Queue<Alloc> = &DEALLOC_QUEUE;
+        let a: Alloc = &TALCK;
         {
             // "Dropped" second, first on cleanup queue
             let _box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
@@ -297,6 +305,9 @@ mod test {
         assert_eq!(expected, tracker.results())
     }
 
+    // Using a custom allocator *and* sending values to other threads.
+    // Despite being dropped in other threads, the underlying drop()
+    // function won't be called until we garbage collect them.
     #[test]
     fn test_talc_send() {
         static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
@@ -306,12 +317,14 @@ mod test {
             TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
         }
 
-        type Alc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
-        static DEALLOC_QUEUE: Queue<Alc> = Queue::new();
+        type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
+        static DEALLOC_QUEUE: Queue<Alloc> = Queue::new();
         let tracker = DT::new();
         let mut expected = BTreeMap::new();
-        let q: &'static Queue<Alc> = &DEALLOC_QUEUE;
-        let a: Alc = &TALCK;
+        let q: &'static Queue<Alloc> = &DEALLOC_QUEUE;
+        let a: Alloc = &TALCK;
+
+        // Create a couple RBox values and send them off to other threads.
         let box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
         let (s1, r1) = std::sync::mpsc::channel();
         let t1 = std::thread::spawn(move || {
@@ -325,6 +338,8 @@ mod test {
             r2.recv().unwrap();
             std::mem::drop(box2);
         });
+
+        // Create an RBox value that gets dropped in this thread.
         {
             let _n3 = D(3, tracker.clone());
         }
@@ -335,8 +350,11 @@ mod test {
 
         s1.send(()).unwrap();
         t1.join().unwrap();
+        // The RBox has been dropped from thread 1, but the stored value
+        // has not been GC'd yet!
         assert_eq!(expected, tracker.results());
         while q.garbage_collect_one() {}
+        // Now the stored value has been GC'd
         expected.insert(1, 1);
         assert_eq!(expected, tracker.results());
 
