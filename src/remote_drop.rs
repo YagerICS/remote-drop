@@ -37,9 +37,9 @@ impl<A: Allocator + 'static> Queue<A> {
         garbage.is_some()
     }
 
-    pub fn garbage_collect_several<const N: usize>(&self) -> bool {
+    pub fn garbage_collect_several<const N: usize>(&self) -> usize {
         let garbage: heapless::Vec<_, N> = self.head.lock(|q| q.borrow_mut().extract_several());
-        !garbage.is_empty()
+        garbage.len()
     }
 }
 

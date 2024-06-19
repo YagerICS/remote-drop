@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "remote-drop"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "critical-section",
  "embassy-sync",
