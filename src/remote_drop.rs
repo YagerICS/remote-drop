@@ -5,6 +5,7 @@ use core::{alloc::AllocError, mem::ManuallyDrop};
 
 use alloc::alloc::Global;
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
 extern crate alloc;
 
@@ -103,6 +104,52 @@ impl<T: Send, A: Allocator> RBox<T, A> {
             )?),
             queue,
         })
+    }
+}
+
+// A vector that will not be mutated or dropped until unfrozen,
+// therefore incurring no allocator operations
+pub struct FrozenVec<T: Send, A: Allocator> {
+    vec: Vec<T, A>,
+}
+
+// Even if Allocator : !Send, this is Send, because
+// the vector will only be unfrozen and operated on in the GC thread,
+// which is guaranteed to have safe access to the Allocator via type
+// constraints on Queue<A>.
+unsafe impl<T: Send, A: Allocator> Send for FrozenVec<T, A> {}
+
+/**
+A slice of values that can be dropped without invoking the underlying
+`Drop::drop` or any allocator operations in the dropping thread.
+*/
+pub struct RSlice<T: Send + 'static, A: Allocator + 'static = Global> {
+    slice: RBox<FrozenVec<T, A>, A>,
+}
+
+impl<T: Send + 'static, A: Allocator + 'static> RSlice<T, A> {
+    pub fn try_new(
+        items: Vec<T, A>,
+        alloc: A,
+        queue: &'static Queue<A>,
+    ) -> Result<Self, AllocError> {
+        Ok(RSlice {
+            slice: RBox::try_new(FrozenVec { vec: items }, alloc, queue)?,
+        })
+    }
+}
+
+impl<T: Send + 'static, A: Allocator + 'static> Deref for RSlice<T, A> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.slice.deref().vec.deref()
+    }
+}
+
+impl<T: Send + 'static, A: Allocator + 'static> DerefMut for RSlice<T, A> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.slice.deref_mut().vec.deref_mut()
     }
 }
 
