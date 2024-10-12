@@ -1,5 +1,4 @@
 use core::alloc::Allocator;
-use core::borrow::BorrowMut;
 use core::cell::RefCell;
 use core::ops::{Deref, DerefMut};
 use core::{alloc::AllocError, mem::ManuallyDrop};
@@ -175,7 +174,7 @@ impl<A: Allocator + 'static> ToDeallocate<A> {
         });
     }
 
-    pub fn extract_one(&mut self) -> Option<Box<dyn DerefNode<A>, A>> {
+    fn extract_one(&mut self) -> Option<Box<dyn DerefNode<A>, A>> {
         let node = core::mem::replace(&mut self.next, None);
         if let Some(mut node) = node {
             self.next = node.the_box.get_next();
@@ -185,9 +184,7 @@ impl<A: Allocator + 'static> ToDeallocate<A> {
         }
     }
 
-    pub fn extract_several<const N: usize>(
-        &mut self,
-    ) -> heapless::Vec<Box<dyn DerefNode<A>, A>, N> {
+    fn extract_several<const N: usize>(&mut self) -> heapless::Vec<Box<dyn DerefNode<A>, A>, N> {
         let mut vec = heapless::Vec::new();
         while vec.len() < vec.capacity()
             && let Some(node) = self.extract_one()
@@ -202,7 +199,7 @@ impl<A: Allocator + 'static> ToDeallocate<A> {
 
 #[cfg(test)]
 mod test {
-    use std::{alloc::Global, collections::HashMap, sync::Mutex};
+    use std::{alloc::Global, sync::Mutex};
 
     use std::sync::Arc;
 
