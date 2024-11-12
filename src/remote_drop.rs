@@ -50,7 +50,20 @@ Instead, the object will be appended to a queue of objects to be dropped later.
 This operation is very fast and predictable.
 */
 pub struct RBox<T: Send + 'static, A: Allocator + 'static = Global> {
+    // We use ManuallyDrop so we can take ownership from the &mut
+    // provided to Drop::drop()
     item: ManuallyDrop<alloc::boxed::Box<DN<T, A>, A>>,
+    queue: &'static Queue<A>,
+}
+
+/*
+Shared heap-allocated objects.
+Immutable references only.
+Last person to drop the RArc will drop the underlying RBox.
+Can be cloned, if `A` can be.
+*/
+pub struct RArc<T: Send + 'static, A: Allocator + 'static = Global> {
+    item: ManuallyDrop<alloc::sync::Arc<RBox<T, A>, A>>,
     queue: &'static Queue<A>,
 }
 
@@ -64,6 +77,8 @@ the underlying `Box` is `Send`.
     */
 unsafe impl<T: Send, A: Allocator + 'static> Send for RBox<T, A> {}
 
+unsafe impl<T: Send, A: Allocator + 'static> Send for RArc<T, A> {}
+
 impl<T: Send + 'static, A: Allocator + 'static> Deref for RBox<T, A> {
     type Target = T;
 
@@ -72,9 +87,27 @@ impl<T: Send + 'static, A: Allocator + 'static> Deref for RBox<T, A> {
     }
 }
 
+impl<T: Send + 'static, A: Allocator + 'static> Deref for RArc<T, A> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.item.deref().deref()
+    }
+}
+
 impl<T: Send + 'static, A: Allocator + 'static> DerefMut for RBox<T, A> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.item.deref_mut().deref_mut().t
+    }
+}
+
+impl<T: Send + 'static, A: Allocator + Clone + 'static> Clone for RArc<T, A> {
+    fn clone(&self) -> Self {
+        let v: alloc::sync::Arc<_, A> = self.item.deref().clone();
+        RArc {
+            item: ManuallyDrop::new(v),
+            queue: self.queue,
+        }
     }
 }
 
@@ -92,6 +125,15 @@ impl<T: Send + 'static, A: Allocator + 'static> Drop for RBox<T, A> {
     }
 }
 
+impl<T: Send + 'static, A: Allocator + 'static> Drop for RArc<T, A> {
+    fn drop(&mut self) {
+        let item = unsafe { ManuallyDrop::take(&mut self.item) };
+        if let Some(rbox) = alloc::sync::Arc::into_inner(item) {
+            core::mem::drop(rbox);
+        }
+    }
+}
+
 impl<T: Send, A: Allocator> RBox<T, A> {
     pub fn try_new(item: T, alloc: A, queue: &'static Queue<A>) -> Result<Self, AllocError> {
         Ok(RBox {
@@ -102,6 +144,17 @@ impl<T: Send, A: Allocator> RBox<T, A> {
                 },
                 alloc,
             )?),
+            queue,
+        })
+    }
+}
+
+impl<T: Send, A: Allocator + Clone> RArc<T, A> {
+    pub fn try_new(item: T, alloc: A, queue: &'static Queue<A>) -> Result<Self, AllocError> {
+        let boxed = RBox::try_new(item, alloc.clone(), queue)?;
+        let arced = alloc::sync::Arc::try_new_in(boxed, alloc)?;
+        Ok(RArc {
+            item: ManuallyDrop::new(arced),
             queue,
         })
     }
