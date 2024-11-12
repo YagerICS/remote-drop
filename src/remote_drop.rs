@@ -1,6 +1,8 @@
 use core::alloc::Allocator;
 use core::cell::RefCell;
 use core::ops::{Deref, DerefMut};
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering::Relaxed;
 use core::{alloc::AllocError, mem::ManuallyDrop};
 
 use alloc::alloc::Global;
@@ -61,10 +63,13 @@ Shared heap-allocated objects.
 Immutable references only.
 Last person to drop the RArc will drop the underlying RBox.
 Can be cloned, if `A` can be.
+Putting `Clone` requirement here so we can use it in `Drop`,
+which makes writing `Drop` easier.
 */
-pub struct RArc<T: Send + 'static, A: Allocator + 'static = Global> {
-    item: ManuallyDrop<alloc::sync::Arc<RBox<T, A>, A>>,
+pub struct RArc<T: Send + 'static, A: Allocator + Clone + 'static = Global> {
+    item: *mut DN<(T, AtomicUsize), A>, // This is the underlying `Box`'s internal pointer
     queue: &'static Queue<A>,
+    allocator: A,
 }
 
 /**
@@ -77,7 +82,7 @@ the underlying `Box` is `Send`.
     */
 unsafe impl<T: Send, A: Allocator + 'static> Send for RBox<T, A> {}
 
-unsafe impl<T: Send, A: Allocator + 'static> Send for RArc<T, A> {}
+unsafe impl<T: Send, A: Allocator + Clone + 'static> Send for RArc<T, A> {}
 
 impl<T: Send + 'static, A: Allocator + 'static> Deref for RBox<T, A> {
     type Target = T;
@@ -87,11 +92,11 @@ impl<T: Send + 'static, A: Allocator + 'static> Deref for RBox<T, A> {
     }
 }
 
-impl<T: Send + 'static, A: Allocator + 'static> Deref for RArc<T, A> {
+impl<T: Send + 'static, A: Allocator + Clone + 'static> Deref for RArc<T, A> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.item.deref().deref()
+        unsafe { &self.item.as_ref().unwrap().t.0 }
     }
 }
 
@@ -103,10 +108,21 @@ impl<T: Send + 'static, A: Allocator + 'static> DerefMut for RBox<T, A> {
 
 impl<T: Send + 'static, A: Allocator + Clone + 'static> Clone for RArc<T, A> {
     fn clone(&self) -> Self {
-        let v: alloc::sync::Arc<_, A> = self.item.deref().clone();
+        let item = unsafe { self.item.as_ref().unwrap() };
+        item.t
+            .1
+            .fetch_update(Relaxed, Relaxed, |clones| {
+                if clones == usize::MAX {
+                    None
+                } else {
+                    Some(clones + 1)
+                }
+            })
+            .expect("Hit max number of RArc clones");
         RArc {
-            item: ManuallyDrop::new(v),
             queue: self.queue,
+            item: self.item,
+            allocator: self.allocator.clone(),
         }
     }
 }
@@ -125,10 +141,30 @@ impl<T: Send + 'static, A: Allocator + 'static> Drop for RBox<T, A> {
     }
 }
 
-impl<T: Send + 'static, A: Allocator + 'static> Drop for RArc<T, A> {
+impl<T: Send + 'static, A: Allocator + Clone + 'static> Drop for RArc<T, A> {
     fn drop(&mut self) {
-        let item = unsafe { ManuallyDrop::take(&mut self.item) };
-        if let Some(rbox) = alloc::sync::Arc::into_inner(item) {
+        if unsafe { self.item.as_ref() }
+            .unwrap()
+            .t
+            .1
+            .fetch_sub(1, Relaxed)
+            == 0
+        {
+            // We are the last person with a ref to this item, so we need to drop it
+
+            // Reconstruct the rbox
+            let rbox = RBox {
+                item: ManuallyDrop::new(unsafe {
+                    Box::from_raw_in(
+                        self.item,
+                        // NB: We could just put the Allocator in a ManuallyDrop and steal it here,
+                        // but I'm just taking advantage of us needing it to be Clone anyway for core Arc functionality
+                        self.allocator.clone(),
+                    )
+                }),
+                queue: self.queue,
+            };
+            // Puts this back on the GC queue
             core::mem::drop(rbox);
         }
     }
@@ -151,11 +187,13 @@ impl<T: Send, A: Allocator> RBox<T, A> {
 
 impl<T: Send, A: Allocator + Clone> RArc<T, A> {
     pub fn try_new(item: T, alloc: A, queue: &'static Queue<A>) -> Result<Self, AllocError> {
-        let boxed = RBox::try_new(item, alloc.clone(), queue)?;
-        let arced = alloc::sync::Arc::try_new_in(boxed, alloc)?;
+        let mut rbox = RBox::try_new((item, AtomicUsize::new(1)), alloc, queue)?;
+        let the_box = unsafe { ManuallyDrop::take(&mut rbox.item) };
+        let (ptr, alloc) = Box::into_raw_with_allocator(the_box);
         Ok(RArc {
-            item: ManuallyDrop::new(arced),
-            queue,
+            item: ptr,
+            queue: rbox.queue,
+            allocator: alloc,
         })
     }
 }
@@ -462,4 +500,5 @@ mod test {
         expected.insert(2, 2);
         assert_eq!(expected, tracker.results());
     }
+    // TODO: Add tests for Arc
 }
