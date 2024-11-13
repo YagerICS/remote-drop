@@ -1,6 +1,7 @@
 use core::alloc::Allocator;
 use core::cell::RefCell;
 use core::ops::{Deref, DerefMut};
+use core::ptr::NonNull;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::Relaxed;
 use core::{alloc::AllocError, mem::ManuallyDrop};
@@ -59,6 +60,11 @@ pub struct RBox<T: Send + 'static, A: Allocator + 'static = Global> {
 }
 
 /*
+We store this in an RBox and then pull out the raw pointer for use in an Arc
+*/
+type ArcInner<T, A> = DN<(T, AtomicUsize), A>;
+
+/*
 Shared heap-allocated objects.
 Immutable references only.
 Last person to drop the RArc will drop the underlying RBox.
@@ -67,7 +73,9 @@ Putting `Clone` requirement here so we can use it in `Drop`,
 which makes writing `Drop` easier.
 */
 pub struct RArc<T: Send + 'static, A: Allocator + Clone + 'static = Global> {
-    item: *mut DN<(T, AtomicUsize), A>, // This is the underlying `Box`'s internal pointer
+    // We use a NonNull instead of *mut to
+    // achieve covariance and indicate that this is never a null pointer
+    item: NonNull<ArcInner<T, A>>, // This is the underlying `Box`'s internal pointer
     queue: &'static Queue<A>,
     allocator: A,
 }
@@ -96,7 +104,7 @@ impl<T: Send + 'static, A: Allocator + Clone + 'static> Deref for RArc<T, A> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { &self.item.as_ref().unwrap().t.0 }
+        unsafe { &self.item.as_ref().t.0 }
     }
 }
 
@@ -108,7 +116,7 @@ impl<T: Send + 'static, A: Allocator + 'static> DerefMut for RBox<T, A> {
 
 impl<T: Send + 'static, A: Allocator + Clone + 'static> Clone for RArc<T, A> {
     fn clone(&self) -> Self {
-        let item = unsafe { self.item.as_ref().unwrap() };
+        let item = unsafe { self.item.as_ref() };
         let borrows = item.t.1.fetch_add(1, Relaxed);
         if borrows == usize::MAX {
             panic!("Max borrows reached");
@@ -137,11 +145,7 @@ impl<T: Send + 'static, A: Allocator + 'static> Drop for RBox<T, A> {
 
 impl<T: Send + 'static, A: Allocator + Clone + 'static> Drop for RArc<T, A> {
     fn drop(&mut self) {
-        let remaining = unsafe { self.item.as_ref() }
-            .unwrap()
-            .t
-            .1
-            .fetch_sub(1, Relaxed);
+        let remaining = unsafe { self.item.as_ref() }.t.1.fetch_sub(1, Relaxed);
 
         extern crate std;
         std::println!("remaining {remaining}");
@@ -152,7 +156,7 @@ impl<T: Send + 'static, A: Allocator + Clone + 'static> Drop for RArc<T, A> {
             let rbox = RBox {
                 item: ManuallyDrop::new(unsafe {
                     Box::from_raw_in(
-                        self.item,
+                        self.item.as_ptr(),
                         // NB: We could just put the Allocator in a ManuallyDrop and steal it here,
                         // but I'm just taking advantage of us needing it to be Clone anyway for core Arc functionality
                         self.allocator.clone(),
@@ -187,7 +191,7 @@ impl<T: Send, A: Allocator + Clone> RArc<T, A> {
         let the_box = unsafe { ManuallyDrop::take(&mut rbox.item) };
         let (ptr, alloc) = Box::into_raw_with_allocator(the_box);
         Ok(RArc {
-            item: ptr,
+            item: NonNull::new(ptr).expect("Null pointer in RArc::try_new"),
             queue: rbox.queue,
             allocator: alloc,
         })
