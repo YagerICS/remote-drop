@@ -1,5 +1,6 @@
 use core::alloc::Allocator;
 use core::cell::RefCell;
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicUsize;
@@ -78,6 +79,8 @@ pub struct RArc<T: Send + 'static, A: Allocator + Clone + 'static = Global> {
     item: NonNull<ArcInner<T, A>>, // This is the underlying `Box`'s internal pointer
     queue: &'static Queue<A>,
     allocator: A,
+    // Tell the drop checker that we (may) drop this type
+    phantom: PhantomData<ArcInner<T, A>>,
 }
 
 /**
@@ -125,6 +128,7 @@ impl<T: Send + 'static, A: Allocator + Clone + 'static> Clone for RArc<T, A> {
             queue: self.queue,
             item: self.item,
             allocator: self.allocator.clone(),
+            phantom: PhantomData,
         }
     }
 }
@@ -194,6 +198,7 @@ impl<T: Send, A: Allocator + Clone> RArc<T, A> {
             item: NonNull::new(ptr).expect("Null pointer in RArc::try_new"),
             queue: rbox.queue,
             allocator: alloc,
+            phantom: PhantomData,
         })
     }
 }
