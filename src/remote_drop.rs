@@ -187,17 +187,24 @@ impl<T: Send, A: Allocator> RBox<T, A> {
             queue,
         })
     }
+
+    fn into_inner(mut self: Self) -> (Box<DN<T, A>, A>, &'static Queue<A>) {
+        let item = unsafe { ManuallyDrop::take(&mut self.item) };
+        let queue = self.queue;
+        core::mem::forget(self);
+        (item, queue)
+    }
 }
 
 impl<T: Send, A: Allocator + Clone> RArc<T, A> {
     pub fn try_new(item: T, alloc: A, queue: &'static Queue<A>) -> Result<Self, AllocError> {
-        let mut rbox = RBox::try_new((item, AtomicUsize::new(1)), alloc, queue)?;
-        let the_box = unsafe { ManuallyDrop::take(&mut rbox.item) };
-        let (ptr, alloc) = Box::into_raw_with_allocator(the_box);
+        let (item, queue) =
+            RBox::into_inner(RBox::try_new((item, AtomicUsize::new(1)), alloc, queue)?);
+        let (ptr, alloc) = Box::into_raw_with_allocator(item);
         Ok(RArc {
             item: NonNull::new(ptr).expect("Null pointer in RArc::try_new"),
-            queue: rbox.queue,
             allocator: alloc,
+            queue,
             phantom: PhantomData,
         })
     }
