@@ -109,16 +109,10 @@ impl<T: Send + 'static, A: Allocator + 'static> DerefMut for RBox<T, A> {
 impl<T: Send + 'static, A: Allocator + Clone + 'static> Clone for RArc<T, A> {
     fn clone(&self) -> Self {
         let item = unsafe { self.item.as_ref().unwrap() };
-        item.t
-            .1
-            .fetch_update(Relaxed, Relaxed, |clones| {
-                if clones == usize::MAX {
-                    None
-                } else {
-                    Some(clones + 1)
-                }
-            })
-            .expect("Hit max number of RArc clones");
+        let borrows = item.t.1.fetch_add(1, Relaxed);
+        if borrows == usize::MAX {
+            panic!("Max borrows reached");
+        }
         RArc {
             queue: self.queue,
             item: self.item,
@@ -143,13 +137,15 @@ impl<T: Send + 'static, A: Allocator + 'static> Drop for RBox<T, A> {
 
 impl<T: Send + 'static, A: Allocator + Clone + 'static> Drop for RArc<T, A> {
     fn drop(&mut self) {
-        if unsafe { self.item.as_ref() }
+        let remaining = unsafe { self.item.as_ref() }
             .unwrap()
             .t
             .1
-            .fetch_sub(1, Relaxed)
-            == 0
-        {
+            .fetch_sub(1, Relaxed);
+
+        extern crate std;
+        std::println!("remaining {remaining}");
+        if remaining == 0 {
             // We are the last person with a ref to this item, so we need to drop it
 
             // Reconstruct the rbox
@@ -344,7 +340,7 @@ mod test {
     use std::collections::BTreeMap;
     use talc::{ErrOnOom, Talc, Talck};
 
-    use crate::remote_drop::{Queue, RBox};
+    use crate::remote_drop::{Queue, RArc, RBox};
 
     // Central place for tracking deallocation order
     struct DeallocTracker<Id> {
@@ -500,5 +496,80 @@ mod test {
         expected.insert(2, 2);
         assert_eq!(expected, tracker.results());
     }
-    // TODO: Add tests for Arc
+
+    #[test]
+    fn test_talc_send_arc() {
+        static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
+        static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
+            Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
+        unsafe {
+            TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
+        }
+
+        type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
+        static DEALLOC_QUEUE: Queue<Alloc> = Queue::new();
+        let tracker = DT::new();
+        let mut expected = BTreeMap::new();
+        let q: &'static Queue<Alloc> = &DEALLOC_QUEUE;
+        let a: Alloc = &TALCK;
+
+        let arc1 = RArc::try_new(D(1, tracker.clone()), a, q).unwrap();
+        let arc1_a = arc1.clone();
+        let (s1, r1) = std::sync::mpsc::channel();
+        let t1 = std::thread::spawn(move || {
+            r1.recv().unwrap();
+            std::mem::drop(arc1_a);
+        });
+
+        expected.insert(0, 1);
+        while q.garbage_collect_one() {}
+        assert_eq!(expected, tracker.results());
+
+        s1.send(()).unwrap();
+        std::println!("arc1 drop");
+        std::mem::drop(arc1);
+        /*
+
+        // Create a couple RBox values and send them off to other threads.
+        let box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
+        let (s1, r1) = std::sync::mpsc::channel();
+        let t1 = std::thread::spawn(move || {
+            r1.recv().unwrap();
+            std::mem::drop(box1);
+        });
+
+        let box2 = RBox::try_new(D(2, tracker.clone()), a, q).unwrap();
+        let (s2, r2) = std::sync::mpsc::channel();
+        let t2 = std::thread::spawn(move || {
+            r2.recv().unwrap();
+            std::mem::drop(box2);
+        });
+
+        // Create an RBox value that gets dropped in this thread.
+        {
+            let _n3 = D(3, tracker.clone());
+        }
+
+        expected.insert(0, 3);
+        while q.garbage_collect_one() {}
+        assert_eq!(expected, tracker.results());
+
+        s1.send(()).unwrap();
+        t1.join().unwrap();
+        // The RBox has been dropped from thread 1, but the stored value
+        // has not been GC'd yet!
+        assert_eq!(expected, tracker.results());
+        while q.garbage_collect_one() {}
+        // Now the stored value has been GC'd
+        expected.insert(1, 1);
+        assert_eq!(expected, tracker.results());
+
+        s2.send(()).unwrap();
+        t2.join().unwrap();
+        assert_eq!(expected, tracker.results());
+        while q.garbage_collect_one() {}
+        expected.insert(2, 2);
+        assert_eq!(expected, tracker.results());
+        */
+    }
 }
