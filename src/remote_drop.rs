@@ -95,8 +95,10 @@ library, we can freely send `RBox`es without worrying about whether
 the underlying `Box` is `Send`.
     */
 unsafe impl<T: Send, A: Allocator + 'static> Send for RBox<T, A> {}
+unsafe impl<T: Send + Sync, A: Allocator + 'static> Sync for RBox<T, A> {}
 
 unsafe impl<T: Send + Sync, A: Allocator + Clone + 'static> Send for RArc<T, A> {}
+unsafe impl<T: Send + Sync, A: Allocator + Clone + 'static> Sync for RArc<T, A> {}
 
 impl<T: Send + 'static, A: Allocator + 'static> Deref for RBox<T, A> {
     type Target = T;
