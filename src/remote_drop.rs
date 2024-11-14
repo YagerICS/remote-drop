@@ -543,60 +543,27 @@ mod test {
         let arc1 = RArc::try_new(D(1, tracker.clone()), a, q).unwrap();
         let arc1_a = arc1.clone();
         let (s1, r1) = std::sync::mpsc::channel();
+        let (s2, r2) = std::sync::mpsc::channel();
         let t1 = std::thread::spawn(move || {
             r1.recv().unwrap();
             std::mem::drop(arc1_a);
+            s2.send(()).unwrap();
         });
+
+        while q.garbage_collect_one() {}
+        assert_eq!(expected, tracker.results());
+
+        s1.send(()).unwrap();
+        r2.recv().unwrap();
+
+        while q.garbage_collect_one() {}
+        assert_eq!(expected, tracker.results());
 
         expected.insert(0, 1);
-        while q.garbage_collect_one() {}
-        assert_eq!(expected, tracker.results());
-
-        s1.send(()).unwrap();
         std::println!("arc1 drop");
         std::mem::drop(arc1);
-        /*
 
-        // Create a couple RBox values and send them off to other threads.
-        let box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
-        let (s1, r1) = std::sync::mpsc::channel();
-        let t1 = std::thread::spawn(move || {
-            r1.recv().unwrap();
-            std::mem::drop(box1);
-        });
-
-        let box2 = RBox::try_new(D(2, tracker.clone()), a, q).unwrap();
-        let (s2, r2) = std::sync::mpsc::channel();
-        let t2 = std::thread::spawn(move || {
-            r2.recv().unwrap();
-            std::mem::drop(box2);
-        });
-
-        // Create an RBox value that gets dropped in this thread.
-        {
-            let _n3 = D(3, tracker.clone());
-        }
-
-        expected.insert(0, 3);
         while q.garbage_collect_one() {}
         assert_eq!(expected, tracker.results());
-
-        s1.send(()).unwrap();
-        t1.join().unwrap();
-        // The RBox has been dropped from thread 1, but the stored value
-        // has not been GC'd yet!
-        assert_eq!(expected, tracker.results());
-        while q.garbage_collect_one() {}
-        // Now the stored value has been GC'd
-        expected.insert(1, 1);
-        assert_eq!(expected, tracker.results());
-
-        s2.send(()).unwrap();
-        t2.join().unwrap();
-        assert_eq!(expected, tracker.results());
-        while q.garbage_collect_one() {}
-        expected.insert(2, 2);
-        assert_eq!(expected, tracker.results());
-        */
     }
 }
