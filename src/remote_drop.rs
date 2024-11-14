@@ -3,8 +3,8 @@ use core::cell::RefCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use core::sync::atomic::AtomicUsize;
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use core::sync::atomic::{self, AtomicBool, AtomicUsize};
 use core::{alloc::AllocError, mem::ManuallyDrop};
 
 use alloc::alloc::Global;
@@ -73,7 +73,10 @@ Can be cloned, if `A` can be.
 Putting `Clone` requirement here so we can use it in `Drop`,
 which makes writing `Drop` easier.
 */
-pub struct RArc<T: Send + 'static, A: Allocator + Clone + 'static = Global> {
+pub struct RArc<
+    T: Send + /* Not totally sure if Sync is required here for semantic sanity */ Sync + 'static,
+    A: Allocator + Clone + 'static = Global,
+> {
     // We use a NonNull instead of *mut to
     // achieve covariance and indicate that this is never a null pointer
     item: NonNull<ArcInner<T, A>>, // This is the underlying `Box`'s internal pointer
@@ -93,7 +96,7 @@ the underlying `Box` is `Send`.
     */
 unsafe impl<T: Send, A: Allocator + 'static> Send for RBox<T, A> {}
 
-unsafe impl<T: Send, A: Allocator + Clone + 'static> Send for RArc<T, A> {}
+unsafe impl<T: Send + Sync, A: Allocator + Clone + 'static> Send for RArc<T, A> {}
 
 impl<T: Send + 'static, A: Allocator + 'static> Deref for RBox<T, A> {
     type Target = T;
@@ -103,7 +106,7 @@ impl<T: Send + 'static, A: Allocator + 'static> Deref for RBox<T, A> {
     }
 }
 
-impl<T: Send + 'static, A: Allocator + Clone + 'static> Deref for RArc<T, A> {
+impl<T: Send + Sync + 'static, A: Allocator + Clone + 'static> Deref for RArc<T, A> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -117,11 +120,12 @@ impl<T: Send + 'static, A: Allocator + 'static> DerefMut for RBox<T, A> {
     }
 }
 
-impl<T: Send + 'static, A: Allocator + Clone + 'static> Clone for RArc<T, A> {
+impl<T: Send + Sync + 'static, A: Allocator + Clone + 'static> Clone for RArc<T, A> {
     fn clone(&self) -> Self {
         let item = unsafe { self.item.as_ref() };
         let borrows = item.t.1.fetch_add(1, Relaxed);
-        if borrows == usize::MAX {
+        // Copying stdlib here. I don't think necessary to cap at 50% but whatever
+        if borrows >= isize::MAX as usize {
             panic!("Max borrows reached");
         }
         RArc {
@@ -147,14 +151,21 @@ impl<T: Send + 'static, A: Allocator + 'static> Drop for RBox<T, A> {
     }
 }
 
-impl<T: Send + 'static, A: Allocator + Clone + 'static> Drop for RArc<T, A> {
+impl<T: Send + Sync + 'static, A: Allocator + Clone + 'static> Drop for RArc<T, A> {
     fn drop(&mut self) {
-        let remaining = unsafe { self.item.as_ref() }.t.1.fetch_sub(1, Relaxed);
+        let inner = unsafe { self.item.as_ref() };
+        // We want the thread that ultimately deletes this arc
+        // (which may not be us) to see all of our writes, so we do this release.
+        let remaining = inner.t.1.fetch_sub(1, Release);
 
-        extern crate std;
-        std::println!("remaining {remaining}");
-        if remaining == 0 {
+        if remaining == 1 {
             // We are the last person with a ref to this item, so we need to drop it
+
+            // We need to make sure see all the writes from other threads before dropping.
+            // Copied from stdlib Arc.
+            // Not totally clear to me why we use a fence instead of synchronizing on `inner.t.1`.
+            // Maybe to make the happy path where we don't drop more performant?
+            atomic::fence(Acquire);
 
             // Reconstruct the rbox
             let rbox = RBox {
@@ -196,7 +207,7 @@ impl<T: Send, A: Allocator> RBox<T, A> {
     }
 }
 
-impl<T: Send, A: Allocator + Clone> RArc<T, A> {
+impl<T: Send + Sync, A: Allocator + Clone> RArc<T, A> {
     pub fn try_new(item: T, alloc: A, queue: &'static Queue<A>) -> Result<Self, AllocError> {
         let (item, queue) =
             RBox::into_inner(RBox::try_new((item, AtomicUsize::new(1)), alloc, queue)?);
