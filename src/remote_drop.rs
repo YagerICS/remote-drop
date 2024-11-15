@@ -372,6 +372,7 @@ impl<A: Allocator + 'static> ToDeallocate<A> {
 mod test {
 
     use std::alloc::Global;
+    use std::vec::Vec;
 
     #[cfg(not(feature = "loom"))]
     use std::{sync::mpsc, sync::Arc, sync::Mutex, thread};
@@ -458,11 +459,12 @@ mod test {
     #[test]
     fn test_talc_drop() {
         run(|| {
-            static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
             static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
                 Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
+
+            let arena = Vec::leak([0u8].into_iter().cycle().take(8 * 1024).collect());
             unsafe {
-                TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
+                TALCK.lock().claim(arena.into()).unwrap();
             }
 
             type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
@@ -493,11 +495,11 @@ mod test {
     #[test]
     fn test_talc_send() {
         run(|| {
-            static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
+            let arena = Vec::leak([0u8].into_iter().cycle().take(8 * 1024).collect());
             static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
                 Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
             unsafe {
-                TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
+                TALCK.lock().claim(arena.into()).unwrap();
             }
 
             type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
@@ -552,11 +554,11 @@ mod test {
     #[test]
     fn test_talc_send_arc() {
         run(|| {
-            static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
+            let arena = Vec::leak([0u8].into_iter().cycle().take(8 * 1024).collect());
             static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
                 Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
             unsafe {
-                TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
+                TALCK.lock().claim(arena.into()).unwrap();
             }
 
             type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
