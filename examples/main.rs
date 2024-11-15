@@ -1,8 +1,7 @@
 #![feature(allocator_api)]
-use std::{alloc::Global, cell::RefCell};
+use std::alloc::Global;
 
-use embassy_sync::blocking_mutex::Mutex;
-use remote_drop::remote_drop::{Queue, RBox, ToDeallocate};
+use remote_drop::remote_drop::{Queue, RBox};
 
 static DEALLOC_QUEUE: Queue<Global> = Queue::new();
 

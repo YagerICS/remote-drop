@@ -4,13 +4,14 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use core::sync::atomic::{self, AtomicBool, AtomicUsize};
+use core::sync::atomic::{self, AtomicUsize};
 use core::{alloc::AllocError, mem::ManuallyDrop};
 
 use alloc::alloc::Global;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use embassy_sync::blocking_mutex::{raw::CriticalSectionRawMutex, Mutex};
+
+use crate::mutex::Mutex;
 extern crate alloc;
 
 /**
@@ -18,7 +19,7 @@ Contains the items that have been pseudo-dropped in other threads and need
 to be actually dropped in the GC thread.
 */
 pub struct Queue<A: Allocator> {
-    head: Mutex<CriticalSectionRawMutex, core::cell::RefCell<ToDeallocate<A>>>,
+    head: Mutex<core::cell::RefCell<ToDeallocate<A>>>,
 }
 
 /**
