@@ -3,8 +3,6 @@ use std::alloc::Global;
 
 use remote_drop::remote_drop::{Queue, RBox};
 
-static DEALLOC_QUEUE: Queue<Global> = Queue::new();
-
 struct Noisy(u64);
 
 impl Drop for Noisy {
@@ -14,6 +12,12 @@ impl Drop for Noisy {
 }
 
 fn main() {
+    #[cfg(feature = "loom")]
+    let q: &'static Queue<Global> = Box::leak(Box::new(Queue::new()));
+
+    #[cfg(not(feature = "loom"))]
+    static DEALLOC_QUEUE: Queue<Global> = Queue::new();
+    #[cfg(not(feature = "loom"))]
     let q: &'static Queue<Global> = &DEALLOC_QUEUE;
     {
         // Will get added to the cleanup queue on drop

@@ -8,6 +8,8 @@ pub struct Mutex<T> {
     inner: embassy_sync::blocking_mutex::Mutex<CriticalSectionRawMutex, T>,
     #[cfg(feature = "std")]
     inner: std::sync::Mutex<T>,
+    #[cfg(feature = "loom")]
+    inner: loom::sync::Mutex<T>,
 }
 impl<T> Mutex<T> {
     pub fn lock<U>(&self, f: impl FnOnce(&T) -> U) -> U {
@@ -15,12 +17,14 @@ impl<T> Mutex<T> {
         {
             return embassy_sync::blocking_mutex::Mutex::lock(&self.inner, f);
         }
-        #[cfg(feature = "std")]
+        #[cfg(any(feature = "std", feature = "loom"))]
         {
             let lock = self.inner.lock().unwrap();
-            f(lock.borrow())
+            return f(lock.borrow());
         }
     }
+
+    #[cfg(not(feature = "loom"))]
     pub const fn new(t: T) -> Self {
         #[cfg(feature = "embassy")]
         {
@@ -30,7 +34,13 @@ impl<T> Mutex<T> {
         #[cfg(feature = "std")]
         {
             let inner = std::sync::Mutex::new(t);
-            Mutex { inner }
+            return Mutex { inner };
         }
+    }
+
+    #[cfg(feature = "loom")]
+    pub fn new(t: T) -> Self {
+        let inner = loom::sync::Mutex::new(t);
+        Mutex { inner }
     }
 }

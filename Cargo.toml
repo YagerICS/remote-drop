@@ -9,6 +9,7 @@ edition = "2021"
 heapless = {version = "0.8.0", features = ["defmt-03"]}
 
 embassy-sync = {git = "https://github.com/embassy-rs/embassy", features=[], optional=true}
+loom = {version = "0.7.2", optional = true}
 
 [dev-dependencies]
 critical-section = {version = "1.1.2", features = ["std"]}
@@ -16,10 +17,11 @@ talc = "4.4.1"
 spin = { version =  "0.9.8", default-features = false, features = ["lock_api", "spin_mutex"] }
 
 [features]
-default = ["std"]
+default = ["loom"]
 std = []
 # You can disable default-features and enable embassy for no-std targets
 embassy = ["dep:embassy-sync"]
+loom = ["dep:loom"]
 
 [[example]]
 name = "main"

@@ -31,7 +31,14 @@ since we can take Box<_,A>s out of the queue.
 unsafe impl<A: Allocator + Send> Send for Queue<A> {}
 
 impl<A: Allocator + 'static> Queue<A> {
+    #[cfg(not(feature = "loom"))]
     pub const fn new() -> Queue<A> {
+        let head = Mutex::new(RefCell::new(ToDeallocate::new()));
+        Queue { head }
+    }
+
+    #[cfg(feature = "loom")]
+    pub fn new() -> Queue<A> {
         let head = Mutex::new(RefCell::new(ToDeallocate::new()));
         Queue { head }
     }
@@ -363,9 +370,14 @@ impl<A: Allocator + 'static> ToDeallocate<A> {
 
 #[cfg(test)]
 mod test {
-    use std::{alloc::Global, sync::Mutex};
 
-    use std::sync::Arc;
+    use std::alloc::Global;
+
+    #[cfg(not(feature = "loom"))]
+    use std::{sync::mpsc, sync::Arc, sync::Mutex, thread};
+
+    #[cfg(feature = "loom")]
+    use loom::{sync::mpsc, sync::Arc, sync::Mutex, thread};
 
     use std::collections::BTreeMap;
     use talc::{ErrOnOom, Talc, Talck};
@@ -410,60 +422,69 @@ mod test {
         }
     }
 
+    fn run<F: Send + Sync + 'static + Fn()>(f: F) {
+        #[cfg(feature = "loom")]
+        loom::model(f);
+        #[cfg(not(feature = "loom"))]
+        f()
+    }
+
     // Simple case - global allocator.
     #[test]
     fn test_global_drop() {
-        static DEALLOC_QUEUE: Queue<Global> = Queue::new();
-        let tracker = DT::new();
-        let mut expected = BTreeMap::new();
-        let q: &'static Queue<Global> = &DEALLOC_QUEUE;
-        {
-            // "Dropped" second, first on cleanup queue
-            let _box1 = RBox::try_new(D(1, tracker.clone()), Global, q).unwrap();
-            expected.insert(1, 1);
-            // "Dropped" first, second on cleanup queue
-            let _box2 = RBox::try_new(D(2, tracker.clone()), Global, q).unwrap();
-            expected.insert(2, 2);
-            let _n3 = D(3, tracker.clone());
-            // n3 should get deallocated first
-            expected.insert(0, 3);
-        }
-        println!("Done allocating");
-        // Clean up all the dropped values.
-        while q.garbage_collect_one() {}
-        assert_eq!(expected, tracker.results())
+        run(|| {
+            let tracker = DT::new();
+            let mut expected = BTreeMap::new();
+            let q: &'static Queue<Global> = Box::leak(Box::new(Queue::new()));
+            {
+                // "Dropped" second, first on cleanup queue
+                let _box1 = RBox::try_new(D(1, tracker.clone()), Global, q).unwrap();
+                expected.insert(1, 1);
+                // "Dropped" first, second on cleanup queue
+                let _box2 = RBox::try_new(D(2, tracker.clone()), Global, q).unwrap();
+                expected.insert(2, 2);
+                let _n3 = D(3, tracker.clone());
+                // n3 should get deallocated first
+                expected.insert(0, 3);
+            }
+            println!("Done allocating");
+            // Clean up all the dropped values.
+            while q.garbage_collect_one() {}
+            assert_eq!(expected, tracker.results())
+        });
     }
 
     // Slightly more complex - using a custom allocator.
     #[test]
     fn test_talc_drop() {
-        static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
-        static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
-            Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
-        unsafe {
-            TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
-        }
+        run(|| {
+            static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
+            static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
+                Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
+            unsafe {
+                TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
+            }
 
-        type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
-        static DEALLOC_QUEUE: Queue<Alloc> = Queue::new();
-        let tracker = DT::new();
-        let mut expected = BTreeMap::new();
-        let q: &'static Queue<Alloc> = &DEALLOC_QUEUE;
-        let a: Alloc = &TALCK;
-        {
-            // "Dropped" second, first on cleanup queue
-            let _box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
-            expected.insert(1, 1);
-            // "Dropped" first, second on cleanup queue
-            let _box2 = RBox::try_new(D(2, tracker.clone()), a, q).unwrap();
-            expected.insert(2, 2);
-            let _n3 = D(3, tracker.clone());
-            // n3 should get deallocated first
-            expected.insert(0, 3);
-        }
-        println!("Done allocating");
-        while q.garbage_collect_one() {}
-        assert_eq!(expected, tracker.results())
+            type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
+            let q: &'static Queue<Alloc> = Box::leak(Box::new(Queue::new()));
+            let tracker = DT::new();
+            let mut expected = BTreeMap::new();
+            let a: Alloc = &TALCK;
+            {
+                // "Dropped" second, first on cleanup queue
+                let _box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
+                expected.insert(1, 1);
+                // "Dropped" first, second on cleanup queue
+                let _box2 = RBox::try_new(D(2, tracker.clone()), a, q).unwrap();
+                expected.insert(2, 2);
+                let _n3 = D(3, tracker.clone());
+                // n3 should get deallocated first
+                expected.insert(0, 3);
+            }
+            println!("Done allocating");
+            while q.garbage_collect_one() {}
+            assert_eq!(expected, tracker.results())
+        });
     }
 
     // Using a custom allocator *and* sending values to other threads.
@@ -471,102 +492,104 @@ mod test {
     // function won't be called until we garbage collect them.
     #[test]
     fn test_talc_send() {
-        static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
-        static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
-            Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
-        unsafe {
-            TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
-        }
+        run(|| {
+            static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
+            static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
+                Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
+            unsafe {
+                TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
+            }
 
-        type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
-        static DEALLOC_QUEUE: Queue<Alloc> = Queue::new();
-        let tracker = DT::new();
-        let mut expected = BTreeMap::new();
-        let q: &'static Queue<Alloc> = &DEALLOC_QUEUE;
-        let a: Alloc = &TALCK;
+            type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
+            let q: &'static Queue<Alloc> = Box::leak(Box::new(Queue::new()));
+            let tracker = DT::new();
+            let mut expected = BTreeMap::new();
+            let a: Alloc = &TALCK;
 
-        // Create a couple RBox values and send them off to other threads.
-        let box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
-        let (s1, r1) = std::sync::mpsc::channel();
-        let t1 = std::thread::spawn(move || {
-            r1.recv().unwrap();
-            std::mem::drop(box1);
+            // Create a couple RBox values and send them off to other threads.
+            let box1 = RBox::try_new(D(1, tracker.clone()), a, q).unwrap();
+            let (s1, r1) = mpsc::channel();
+            let t1 = thread::spawn(move || {
+                r1.recv().unwrap();
+                std::mem::drop(box1);
+            });
+
+            let box2 = RBox::try_new(D(2, tracker.clone()), a, q).unwrap();
+            let (s2, r2) = mpsc::channel();
+            let t2 = thread::spawn(move || {
+                r2.recv().unwrap();
+                std::mem::drop(box2);
+            });
+
+            // Create an RBox value that gets dropped in this thread.
+            {
+                let _n3 = D(3, tracker.clone());
+            }
+
+            expected.insert(0, 3);
+            while q.garbage_collect_one() {}
+            assert_eq!(expected, tracker.results());
+
+            s1.send(()).unwrap();
+            t1.join().unwrap();
+            // The RBox has been dropped from thread 1, but the stored value
+            // has not been GC'd yet!
+            assert_eq!(expected, tracker.results());
+            while q.garbage_collect_one() {}
+            // Now the stored value has been GC'd
+            expected.insert(1, 1);
+            assert_eq!(expected, tracker.results());
+
+            s2.send(()).unwrap();
+            t2.join().unwrap();
+            assert_eq!(expected, tracker.results());
+            while q.garbage_collect_one() {}
+            expected.insert(2, 2);
+            assert_eq!(expected, tracker.results());
         });
-
-        let box2 = RBox::try_new(D(2, tracker.clone()), a, q).unwrap();
-        let (s2, r2) = std::sync::mpsc::channel();
-        let t2 = std::thread::spawn(move || {
-            r2.recv().unwrap();
-            std::mem::drop(box2);
-        });
-
-        // Create an RBox value that gets dropped in this thread.
-        {
-            let _n3 = D(3, tracker.clone());
-        }
-
-        expected.insert(0, 3);
-        while q.garbage_collect_one() {}
-        assert_eq!(expected, tracker.results());
-
-        s1.send(()).unwrap();
-        t1.join().unwrap();
-        // The RBox has been dropped from thread 1, but the stored value
-        // has not been GC'd yet!
-        assert_eq!(expected, tracker.results());
-        while q.garbage_collect_one() {}
-        // Now the stored value has been GC'd
-        expected.insert(1, 1);
-        assert_eq!(expected, tracker.results());
-
-        s2.send(()).unwrap();
-        t2.join().unwrap();
-        assert_eq!(expected, tracker.results());
-        while q.garbage_collect_one() {}
-        expected.insert(2, 2);
-        assert_eq!(expected, tracker.results());
     }
 
     #[test]
     fn test_talc_send_arc() {
-        static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
-        static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
-            Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
-        unsafe {
-            TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
-        }
+        run(|| {
+            static mut ARENA: [u8; 8 * 1024] = [0; 8 * 1024];
+            static TALCK: Talck<spin::Mutex<()>, ErrOnOom> =
+                Talc::new(ErrOnOom).lock::<spin::Mutex<()>>();
+            unsafe {
+                TALCK.lock().claim(ARENA.as_mut().into()).unwrap();
+            }
 
-        type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
-        static DEALLOC_QUEUE: Queue<Alloc> = Queue::new();
-        let tracker = DT::new();
-        let mut expected = BTreeMap::new();
-        let q: &'static Queue<Alloc> = &DEALLOC_QUEUE;
-        let a: Alloc = &TALCK;
+            type Alloc = &'static Talck<spin::Mutex<()>, ErrOnOom>;
+            let q: &'static Queue<Alloc> = Box::leak(Box::new(Queue::new()));
+            let tracker = DT::new();
+            let mut expected = BTreeMap::new();
+            let a: Alloc = &TALCK;
 
-        let arc1 = RArc::try_new(D(1, tracker.clone()), a, q).unwrap();
-        let arc1_a = arc1.clone();
-        let (s1, r1) = std::sync::mpsc::channel();
-        let (s2, r2) = std::sync::mpsc::channel();
-        let t1 = std::thread::spawn(move || {
-            r1.recv().unwrap();
-            std::mem::drop(arc1_a);
-            s2.send(()).unwrap();
+            let arc1 = RArc::try_new(D(1, tracker.clone()), a, q).unwrap();
+            let arc1_a = arc1.clone();
+            let (s1, r1) = mpsc::channel();
+            let (s2, r2) = mpsc::channel();
+            let t1 = thread::spawn(move || {
+                r1.recv().unwrap();
+                std::mem::drop(arc1_a);
+                s2.send(()).unwrap();
+            });
+
+            while q.garbage_collect_one() {}
+            assert_eq!(expected, tracker.results());
+
+            s1.send(()).unwrap();
+            r2.recv().unwrap();
+
+            while q.garbage_collect_one() {}
+            assert_eq!(expected, tracker.results());
+
+            expected.insert(0, 1);
+            std::println!("arc1 drop");
+            std::mem::drop(arc1);
+
+            while q.garbage_collect_one() {}
+            assert_eq!(expected, tracker.results());
         });
-
-        while q.garbage_collect_one() {}
-        assert_eq!(expected, tracker.results());
-
-        s1.send(()).unwrap();
-        r2.recv().unwrap();
-
-        while q.garbage_collect_one() {}
-        assert_eq!(expected, tracker.results());
-
-        expected.insert(0, 1);
-        std::println!("arc1 drop");
-        std::mem::drop(arc1);
-
-        while q.garbage_collect_one() {}
-        assert_eq!(expected, tracker.results());
     }
 }
