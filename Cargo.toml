@@ -1,6 +1,6 @@
 [package]
 name = "remote-drop"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -17,7 +17,7 @@ talc = "4.4.1"
 spin = { version =  "0.9.8", default-features = false, features = ["lock_api", "spin_mutex"] }
 
 [features]
-default = ["loom"]
+default = []
 std = []
 # You can disable default-features and enable embassy for no-std targets
 embassy = ["dep:embassy-sync"]
