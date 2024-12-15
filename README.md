@@ -11,7 +11,7 @@ Does not require a global allocator or `std`. You can use any allocator via the 
 Extremely low overhead - no extra allocations and only one extra memory word per allocated object.
 Other approaches tend to A) require extra allocations and B) require the use of a global allocator.
 
-Can use `embassy_sync`, `std`, or `loom` mutexes for internal locking.
+Can use `embassy_sync` (for embedded), `std` (for non-embedded), or `loom` (for testing) mutexes for internal locking, selected by cargo feature.
 
 Compared to `defer_drop`, which provides a similar capability:
 * This library is `no_std`
