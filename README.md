@@ -11,10 +11,7 @@ Does not require a global allocator or `std`. You can use any allocator via the 
 Extremely low overhead - no extra allocations and only one extra memory word per allocated object.
 Other approaches tend to A) require extra allocations and B) require the use of a global allocator.
 
-Currently depends on `embassy_sync` for `CriticalSectionRawMutex` (used to lock the cleanup queue),
-but it should be pretty easy to make this library parametric over choice of mutex.
-
-
+Can use `embassy_sync`, `std`, or `loom` mutexes for internal locking.
 
 Compared to `defer_drop`, which provides a similar capability:
 * This library is `no_std`
